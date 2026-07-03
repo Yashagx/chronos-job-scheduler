@@ -14,6 +14,7 @@ import { projectRoutes } from './routes/projects'
 import { queueRoutes } from './routes/queues'
 import { jobRoutes } from './routes/jobs'
 import { workerRoutes } from './routes/workers'
+import { dashboardRoutes } from './routes/dashboard'
 import { ChronosError } from './lib/errors'
 
 const PORT = Number(process.env.API_PORT) || 4000
@@ -118,6 +119,7 @@ async function buildApp() {
   await fastify.register(queueRoutes)
   await fastify.register(jobRoutes)
   await fastify.register(workerRoutes, { prefix: '/workers' })
+  await fastify.register(dashboardRoutes, { prefix: '/dashboard' })
 
   // Health check
   fastify.get('/health', {

@@ -1,149 +1,152 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { io, Socket } from 'socket.io-client'
+import { useEffect, useState, useCallback } from 'react'
+import AppShell from '@/components/AppShell'
+import { apiFetch } from '@/lib/api'
+import { getSocket } from '@/lib/socket'
 
-interface JobStats {
-  queueId: string
-  queueName: string
-  totalJobs: number
-  byStatus: Record<string, number>
+interface Summary {
+  totalQueues: number
+  activeWorkers: number
+  totalWorkers: number
+  failedJobs: number
+  queuedJobs: number
+  runningJobs: number
+  completedJobsToday: number
   jobsPerMinute: number
 }
 
-interface WorkerStats {
+interface Event {
   id: string
-  hostname: string
-  status: string
-  activeJobs: number
+  text: string
+  ts: string
+}
+
+function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+  return (
+    <div className="rounded-xl border bg-card text-card-foreground shadow">
+      <div className="p-6 pb-2">
+        <h3 className="tracking-tight text-sm font-medium text-muted-foreground">{label}</h3>
+      </div>
+      <div className="p-6 pt-0">
+        <div className="text-2xl font-bold">{value}</div>
+        {sub && <p className="text-xs text-muted-foreground mt-0.5">{sub}</p>}
+      </div>
+    </div>
+  )
 }
 
 export default function DashboardPage() {
-  const [socket, setSocket] = useState<Socket | null>(null)
-  const [stats, setStats] = useState<JobStats[]>([])
-  const [workers, setWorkers] = useState<WorkerStats[]>([])
-  const [logs, setLogs] = useState<string[]>([])
-  
-  useEffect(() => {
-    // Connect to Socket.io on the API server
-    const s = io(process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:4000', {
-      path: '/socket.io/',
-      transports: ['websocket'],
-    })
-    
-    setSocket(s)
+  const [summary, setSummary] = useState<Summary | null>(null)
+  const [events, setEvents] = useState<Event[]>([])
+  const [connected, setConnected] = useState(false)
 
-    s.on('connect', () => {
-      addLog('Connected to Real-time API via WebSocket')
-    })
+  const addEvent = useCallback((text: string) => {
+    const id = `${Date.now()}-${Math.random()}`
+    const ts = new Date().toLocaleTimeString()
+    setEvents(prev => [{ id, text, ts }, ...prev].slice(0, 30))
+  }, [])
 
-    s.on('job:update', (data) => {
-      addLog(`Job Update: [${data.status}] Job ${data.jobId} in queue ${data.queueId}`)
-    })
-
-    s.on('worker:update', (data) => {
-      addLog(`Worker Update: Worker ${data.workerId} heartbeat (Jobs: ${data.activeJobCount})`)
-    })
-
-    return () => {
-      s.disconnect()
+  const loadSummary = useCallback(async () => {
+    try {
+      const data = await apiFetch<Summary>('/dashboard/summary')
+      setSummary(data)
+    } catch {
+      // Silently fail on summary fetch — page will show stale data
     }
   }, [])
 
-  const addLog = (msg: string) => {
-    setLogs((prev) => [msg, ...prev].slice(0, 10))
-  }
+  useEffect(() => {
+    loadSummary()
+    const interval = setInterval(loadSummary, 15_000)
 
-  // A quick stub for demonstration. In a real app we would fetch the initial state via REST.
+    const socket = getSocket()
+
+    const onConnect = () => {
+      setConnected(true)
+      addEvent('Connected to real-time event stream')
+    }
+    const onDisconnect = () => {
+      setConnected(false)
+      addEvent('Disconnected — reconnecting…')
+    }
+    const onJobTransition = (data: { jobId: string; status: string; queueId: string }) => {
+      addEvent(`Job ${data.jobId.slice(0, 8)}… → ${data.status} (queue: ${data.queueId.slice(0, 8)}…)`)
+      loadSummary()
+    }
+    const onWorkerHeartbeat = (data: { workerId: string; activeJobCount: number }) => {
+      addEvent(`Worker ${data.workerId.slice(0, 8)}… heartbeat — ${data.activeJobCount} active jobs`)
+    }
+
+    socket.on('connect', onConnect)
+    socket.on('disconnect', onDisconnect)
+    socket.on('job:transition', onJobTransition)
+    socket.on('worker:heartbeat', onWorkerHeartbeat)
+
+    if (socket.connected) setConnected(true)
+
+    return () => {
+      clearInterval(interval)
+      socket.off('connect', onConnect)
+      socket.off('disconnect', onDisconnect)
+      socket.off('job:transition', onJobTransition)
+      socket.off('worker:heartbeat', onWorkerHeartbeat)
+    }
+  }, [addEvent, loadSummary])
+
   return (
-    <div className="flex flex-col gap-8 max-w-5xl mx-auto">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight mb-2">Chronos Overview</h1>
-        <p className="text-muted-foreground">Monitor your distributed queues and worker nodes in real-time.</p>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {/* Simple stat cards mimicking shadcn UI */}
-        <div className="rounded-xl border bg-card text-card-foreground shadow">
-          <div className="p-6 flex flex-row items-center justify-between space-y-0 pb-2">
-            <h3 className="tracking-tight text-sm font-medium">Total Queues</h3>
-          </div>
-          <div className="p-6 pt-0">
-            <div className="text-2xl font-bold">3</div>
-          </div>
-        </div>
-        
-        <div className="rounded-xl border bg-card text-card-foreground shadow">
-          <div className="p-6 flex flex-row items-center justify-between space-y-0 pb-2">
-            <h3 className="tracking-tight text-sm font-medium">Active Workers</h3>
-          </div>
-          <div className="p-6 pt-0">
-            <div className="text-2xl font-bold text-green-500">2</div>
-          </div>
+    <AppShell>
+      <div className="flex flex-col gap-6 max-w-6xl mx-auto">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+          <p className="text-muted-foreground text-sm mt-1">System overview — refreshes every 15 seconds</p>
         </div>
 
-        <div className="rounded-xl border bg-card text-card-foreground shadow">
-          <div className="p-6 flex flex-row items-center justify-between space-y-0 pb-2">
-            <h3 className="tracking-tight text-sm font-medium">Throughput</h3>
-          </div>
-          <div className="p-6 pt-0">
-            <div className="text-2xl font-bold">140 / min</div>
-          </div>
+        {/* Stat cards */}
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <StatCard label="Total Queues" value={summary?.totalQueues ?? '—'} />
+          <StatCard
+            label="Active Workers"
+            value={summary ? `${summary.activeWorkers} / ${summary.totalWorkers}` : '—'}
+          />
+          <StatCard
+            label="Jobs / min"
+            value={summary?.jobsPerMinute ?? '—'}
+            sub={`${summary?.queuedJobs ?? '—'} queued · ${summary?.runningJobs ?? '—'} running`}
+          />
+          <StatCard
+            label="Failed Jobs"
+            value={summary?.failedJobs ?? '—'}
+            sub={`${summary?.completedJobsToday ?? '—'} completed today`}
+          />
         </div>
 
-        <div className="rounded-xl border bg-card text-card-foreground shadow">
-          <div className="p-6 flex flex-row items-center justify-between space-y-0 pb-2">
-            <h3 className="tracking-tight text-sm font-medium">Failed Jobs</h3>
-          </div>
-          <div className="p-6 pt-0">
-            <div className="text-2xl font-bold text-destructive">12</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-        <div className="col-span-4 rounded-xl border bg-card text-card-foreground shadow">
-          <div className="p-6 flex flex-col space-y-1.5">
-            <h3 className="font-semibold leading-none tracking-tight">Real-time Event Stream</h3>
-            <p className="text-sm text-muted-foreground">Live updates from Redis Pub/Sub.</p>
-          </div>
-          <div className="p-6 pt-0">
-            <div className="space-y-4">
-              {logs.length === 0 && <div className="text-sm text-muted-foreground">Waiting for events...</div>}
-              {logs.map((log, i) => (
-                <div key={i} className="text-sm font-mono p-2 bg-muted rounded">
-                  {log}
-                </div>
-              ))}
+        {/* Event stream */}
+        <div className="rounded-xl border bg-card shadow">
+          <div className="flex items-center justify-between px-6 py-4 border-b">
+            <div>
+              <h2 className="font-semibold">Real-time Event Stream</h2>
+              <p className="text-xs text-muted-foreground">Live job transitions and worker heartbeats via WebSocket</p>
+            </div>
+            <div className={`flex items-center gap-1.5 text-xs font-medium ${connected ? 'text-green-500' : 'text-muted-foreground'}`}>
+              <span className={`h-2 w-2 rounded-full ${connected ? 'bg-green-500' : 'bg-muted-foreground'}`} />
+              {connected ? 'Connected' : 'Disconnected'}
             </div>
           </div>
-        </div>
-        
-        <div className="col-span-3 rounded-xl border bg-card text-card-foreground shadow">
-          <div className="p-6 flex flex-col space-y-1.5">
-            <h3 className="font-semibold leading-none tracking-tight">Active Queues</h3>
-          </div>
-          <div className="p-6 pt-0">
-             <div className="space-y-4">
-                {/* Mock Queue List */}
-                <div className="flex items-center">
-                  <div className="ml-4 space-y-1">
-                    <p className="text-sm font-medium leading-none">Email Notifications</p>
-                    <p className="text-sm text-muted-foreground">High Priority</p>
-                  </div>
-                  <div className="ml-auto font-medium text-sm">42 Queued</div>
+          <div className="p-4 space-y-1.5 min-h-[200px] max-h-[400px] overflow-y-auto">
+            {events.length === 0 ? (
+              <p className="text-sm text-muted-foreground italic">Waiting for events…</p>
+            ) : (
+              events.map(e => (
+                <div key={e.id} className="flex items-start gap-3 text-sm font-mono">
+                  <span className="text-muted-foreground shrink-0 text-xs pt-0.5">{e.ts}</span>
+                  <span>{e.text}</span>
                 </div>
-                <div className="flex items-center">
-                  <div className="ml-4 space-y-1">
-                    <p className="text-sm font-medium leading-none">Image Processing</p>
-                    <p className="text-sm text-muted-foreground">Default Priority</p>
-                  </div>
-                  <div className="ml-auto font-medium text-sm">0 Queued</div>
-                </div>
-             </div>
+              ))
+            )}
           </div>
         </div>
       </div>
-    </div>
+    </AppShell>
   )
 }

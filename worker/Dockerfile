@@ -1,4 +1,4 @@
-# Stage 1: Production dependencies only
+﻿# Stage 1: Production dependencies only
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY worker/package.json worker/package-lock.json* ./
@@ -7,6 +7,7 @@ RUN npm ci --omit=dev
 # Stage 2: Full build (TypeScript compile + Prisma generate)
 FROM node:20-alpine AS builder
 WORKDIR /app
+RUN apk add --no-cache openssl
 COPY worker/package.json worker/package-lock.json* ./
 RUN npm ci
 COPY worker/ .
@@ -18,6 +19,7 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apk add --no-cache openssl
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
@@ -26,3 +28,4 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY prisma ./prisma
 
 CMD ["node", "dist/index.js"]
+

@@ -1,0 +1,326 @@
+// prisma/schema.prisma
+// Chronos — Distributed Job Scheduling Platform
+// Schema design rationale documented in docs/DESIGN_DECISIONS.md
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  admin
+  member
+}
+
+enum OrgMemberRole {
+  owner
+  admin
+  member
+}
+
+enum RetryStrategy {
+  fixed
+  linear
+  exponential
+}
+
+enum JobStatus {
+  queued
+  scheduled
+  claimed
+  running
+  completed
+  failed
+  dead_letter
+  cancelled
+}
+
+enum WorkerStatus {
+  active
+  draining
+  dead
+}
+
+// ─── Auth / Org ───────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(member)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  ownedOrgs   Organization[]  @relation("OrgOwner")
+  memberships OrgMembership[]
+
+  @@map("users")
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String   @map("owner_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  owner    User            @relation("OrgOwner", fields: [ownerId], references: [id])
+  members  OrgMembership[]
+  projects Project[]
+
+  @@map("organizations")
+}
+
+// Composite UNIQUE(org_id, user_id) enforced here
+// Cascade on org delete — if org is deleted, memberships are cleaned up.
+// No cascade on user delete — user deletion should be an explicit admin action,
+// memberships/history preserved for audit. Application layer must handle this.
+model OrgMembership {
+  id        String        @id @default(cuid())
+  orgId     String        @map("org_id")
+  userId    String        @map("user_id")
+  role      OrgMemberRole @default(member)
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@map("org_memberships")
+}
+
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
+model Project {
+  id        String   @id @default(cuid())
+  orgId     String   @map("org_id")
+  name      String
+  apiKey    String   @unique @default(cuid()) @map("api_key")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization  Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  queues        Queue[]
+  retryPolicies RetryPolicy[]
+  scheduledJobs ScheduledJob[]
+
+  @@index([orgId])
+  @@map("projects")
+}
+
+// ─── Retry Policies ───────────────────────────────────────────────────────────
+
+// Retry policies are project-scoped so teams can define standard policies
+// and reuse them across queues and individual jobs.
+model RetryPolicy {
+  id          String        @id @default(cuid())
+  projectId   String        @map("project_id")
+  name        String        @default("default")
+  strategy    RetryStrategy @default(exponential)
+  baseDelayMs Int           @default(1000) @map("base_delay_ms")
+  maxDelayMs  Int           @default(30000) @map("max_delay_ms")
+  maxAttempts Int           @default(3) @map("max_attempts")
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  queues  Queue[]
+  jobs    Job[]
+
+  @@index([projectId])
+  @@map("retry_policies")
+}
+
+// ─── Queues ───────────────────────────────────────────────────────────────────
+
+// UNIQUE(project_id, name) — queue names are scoped to their project.
+// concurrency_limit enforced at claim time by counting running jobs for this queue.
+model Queue {
+  id                   String   @id @default(cuid())
+  projectId            String   @map("project_id")
+  name                 String
+  priority             Int      @default(0)
+  concurrencyLimit     Int      @default(10) @map("concurrency_limit")
+  isPaused             Boolean  @default(false) @map("is_paused")
+  defaultRetryPolicyId String?  @map("default_retry_policy_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  project            Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  defaultRetryPolicy RetryPolicy? @relation(fields: [defaultRetryPolicyId], references: [id])
+  jobs               Job[]
+  scheduledJobs      ScheduledJob[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+  @@map("queues")
+}
+
+// ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+// payload is JSONB — job types have heterogeneous schemas. Enforcing a rigid
+// relational schema per job type would require an EAV anti-pattern or a table
+// per type. JSONB gives flexibility with GIN indexing if needed for filtering.
+//
+// Claim index: (queue_id, status, run_at) — the claim query filters by queue_id
+// and status = 'queued', then range-scans on run_at. This composite index makes
+// the claim query a fast index scan, not a seq scan even with millions of rows.
+//
+// Idempotency: partial unique index (queue_id, idempotency_key) WHERE
+// idempotency_key IS NOT NULL — created as a raw SQL index in the migration
+// because Prisma schema doesn't support partial indexes natively.
+//
+// batch_id: a shared UUID assigned at submission time to group batch members.
+// Stored as a plain String (not a FK to jobs) to avoid circular dependency issues
+// and because a batch is a logical grouping tag, not a parent-child tree.
+model Job {
+  id             String    @id @default(cuid())
+  queueId        String    @map("queue_id")
+  type           String
+  payload        Json      @default("{}")
+  status         JobStatus @default(queued)
+  priority       Int       @default(0)
+  runAt          DateTime  @default(now()) @map("run_at")
+  cronExpression String?   @map("cron_expression")
+  batchId        String?   @map("batch_id")
+  attemptCount   Int       @default(0) @map("attempt_count")
+  retryPolicyId  String?   @map("retry_policy_id")
+  idempotencyKey String?   @map("idempotency_key")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  queue       Queue        @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  retryPolicy RetryPolicy? @relation(fields: [retryPolicyId], references: [id])
+  executions  JobExecution[]
+  deadLetter  DeadLetterJob?
+
+  // Core claim index — see comment above
+  @@index([queueId, status, runAt], name: "idx_jobs_claim")
+  @@index([batchId], name: "idx_jobs_batch")
+  @@index([status], name: "idx_jobs_status")
+  @@map("jobs")
+}
+
+// ─── Job Executions & Logs ────────────────────────────────────────────────────
+
+// One row per attempt. Multiple executions per job (one per retry attempt).
+// Cascade on job delete — executions are owned by the job.
+model JobExecution {
+  id            String    @id @default(cuid())
+  jobId         String    @map("job_id")
+  workerId      String    @map("worker_id")
+  attemptNumber Int       @map("attempt_number")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  finishedAt    DateTime? @map("finished_at")
+  status        String    // 'completed' | 'failed'
+  errorMessage  String?   @map("error_message")
+  durationMs    Int?      @map("duration_ms")
+
+  job    Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker Worker   @relation(fields: [workerId], references: [id])
+  logs   JobLog[]
+
+  @@index([jobId, attemptNumber], name: "idx_executions_job_attempt")
+  @@index([workerId], name: "idx_executions_worker")
+  @@map("job_executions")
+}
+
+model JobLog {
+  id          String   @id @default(cuid())
+  executionId String   @map("execution_id")
+  timestamp   DateTime @default(now())
+  level       String   // 'debug' | 'info' | 'warn' | 'error'
+  message     String
+
+  execution JobExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId, timestamp], name: "idx_logs_execution_time")
+  @@map("job_logs")
+}
+
+// ─── Workers ─────────────────────────────────────────────────────────────────
+
+// Workers self-register on startup, write heartbeats every N seconds.
+// A reaper job checks last_heartbeat_at; workers with stale heartbeats
+// are marked 'dead' and their claimed/running jobs are requeued.
+model Worker {
+  id              String       @id @default(cuid())
+  hostname        String
+  pid             Int
+  status          WorkerStatus @default(active)
+  startedAt       DateTime     @default(now()) @map("started_at")
+  lastHeartbeatAt DateTime     @default(now()) @map("last_heartbeat_at")
+
+  executions JobExecution[]
+  heartbeats WorkerHeartbeat[]
+
+  @@index([status, lastHeartbeatAt], name: "idx_workers_status_heartbeat")
+  @@map("workers")
+}
+
+// Keep last N heartbeats (pruned by the heartbeat writer).
+// Used for the Workers dashboard — CPU load and active job count over time.
+model WorkerHeartbeat {
+  id             String   @id @default(cuid())
+  workerId       String   @map("worker_id")
+  timestamp      DateTime @default(now())
+  activeJobCount Int      @default(0) @map("active_job_count")
+  cpuLoad        Float?   @map("cpu_load")
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, timestamp], name: "idx_heartbeats_worker_time")
+  @@map("worker_heartbeats")
+}
+
+// ─── Scheduled Jobs (Cron Definitions) ───────────────────────────────────────
+
+// DESIGN: scheduled_jobs holds cron DEFINITIONS — they are templates with a
+// cron_expression and a job_template (JSONB). On each scheduler tick (every 5s),
+// the worker's scheduler.ts evaluates next_run_at and materializes a new row
+// in `jobs` when the definition is due. This separation is intentional:
+// - A scheduled_job row is permanent (exists as long as the cron is active)
+// - A jobs row is ephemeral (exists per execution, has its own lifecycle/retries)
+// Mixing them into a single table would require nullable columns for recurring
+// vs one-shot jobs and make the claim index less selective.
+model ScheduledJob {
+  id             String    @id @default(cuid())
+  projectId      String    @map("project_id")
+  cronExpression String    @map("cron_expression")
+  queueId        String    @map("queue_id")
+  jobTemplate    Json      @map("job_template")
+  isActive       Boolean   @default(true) @map("is_active")
+  lastRunAt      DateTime? @map("last_run_at")
+  nextRunAt      DateTime? @map("next_run_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  queue   Queue   @relation(fields: [queueId], references: [id], onDelete: Cascade)
+
+  // Primary index for the scheduler tick query
+  @@index([isActive, nextRunAt], name: "idx_scheduled_jobs_tick")
+  @@map("scheduled_jobs")
+}
+
+// ─── Dead Letter Queue ────────────────────────────────────────────────────────
+
+// Jobs exhausting max_attempts are moved here. Payload is copied so the original
+// job record can be queried independently. The DLQ row is for operational visibility
+// (monitoring, alerting, manual replay) not for re-execution.
+model DeadLetterJob {
+  id            String   @id @default(cuid())
+  originalJobId String   @unique @map("original_job_id")
+  queueId       String   @map("queue_id")
+  payload       Json
+  failureReason String   @map("failure_reason")
+  attemptCount  Int      @map("attempt_count")
+  movedAt       DateTime @default(now()) @map("moved_at")
+
+  originalJob Job @relation(fields: [originalJobId], references: [id], onDelete: Cascade)
+
+  @@index([queueId, movedAt], name: "idx_dlq_queue_time")
+  @@map("dead_letter_jobs")
+}

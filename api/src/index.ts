@@ -8,7 +8,7 @@ import { createServer } from 'http'
 
 import { prisma } from './lib/prisma'
 import { redis, redisSub } from './lib/redis'
-import { setupSocketServer } from './socket'
+import createSocketServer from './socket'
 import { authRoutes } from './routes/auth'
 import { projectRoutes } from './routes/projects'
 import { queueRoutes } from './routes/queues'
@@ -138,7 +138,7 @@ async function main() {
   const httpServer = createServer(fastify.server)
 
   // Attach Socket.io to the HTTP server
-  await setupSocketServer(httpServer)
+  await createSocketServer(httpServer)
 
   // Connect to Redis
   await redis.connect()

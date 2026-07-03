@@ -94,7 +94,7 @@ export function createSocketServer(httpServer: HttpServer): ChronosSocketServer 
       const data = JSON.parse(message) as Record<string, unknown>;
 
       if (channel === 'job:transitions') {
-        const event = data as JobTransitionEvent & { type?: string };
+        const event = data as unknown as JobTransitionEvent & { type?: string };
 
         // Emit to queue room
         if (event.queueId) {
@@ -106,7 +106,7 @@ export function createSocketServer(httpServer: HttpServer): ChronosSocketServer 
           io.to(`project:${event.projectId}`).emit('job:update', event);
         }
       } else if (channel === 'worker:heartbeat') {
-        const event = data as WorkerHeartbeatEvent;
+        const event = data as unknown as WorkerHeartbeatEvent;
 
         // Broadcast worker updates to all connected clients
         io.emit('worker:update', event);

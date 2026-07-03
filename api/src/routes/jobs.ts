@@ -1,4 +1,4 @@
-// src/routes/jobs.ts
+﻿// src/routes/jobs.ts
 // Job management routes — submission, listing, retry, cancel.
 
 import { FastifyInstance } from 'fastify';
@@ -22,7 +22,7 @@ import { JobStatus } from '@prisma/client';
 
 const createJobSchema = z.object({
   type: z.string().min(1).max(128),
-  payload: z.record(z.unknown()).optional().default({}),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
   runAt: z.string().datetime().optional(),
   cronExpression: z.string().optional(),
   retryPolicyId: z.string().optional(),
@@ -32,7 +32,7 @@ const createJobSchema = z.object({
 
 const batchJobSchema = z.object({
   type: z.string().min(1).max(128),
-  payload: z.record(z.unknown()).optional().default({}),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
   runAt: z.string().datetime().optional(),
   priority: z.number().int().min(0).max(100).optional(),
   idempotencyKey: z.string().max(256).optional(),
@@ -162,7 +162,7 @@ export async function jobRoutes(fastify: FastifyInstance): Promise<void> {
             projectId: queue.projectId,
             cronExpression,
             queueId,
-            jobTemplate: { type, payload: payload ?? {}, retryPolicyId, priority: priority ?? 0 },
+            jobTemplate: { type, payload: (payload ?? {}) as never, retryPolicyId, priority: priority ?? 0 },
             nextRunAt,
           },
         });
@@ -201,7 +201,7 @@ export async function jobRoutes(fastify: FastifyInstance): Promise<void> {
         data: {
           queueId,
           type,
-          payload: payload ?? {},
+          payload: (payload ?? {}) as never,
           status,
           priority: priority ?? 0,
           runAt: resolvedRunAt,
@@ -318,7 +318,7 @@ export async function jobRoutes(fastify: FastifyInstance): Promise<void> {
         return {
           queueId,
           type: j.type,
-          payload: j.payload ?? {},
+          payload: (j.payload ?? {}) as never,
           status,
           priority: j.priority ?? 0,
           runAt: resolvedRunAt,
@@ -412,7 +412,7 @@ export async function jobRoutes(fastify: FastifyInstance): Promise<void> {
       });
       const orgIds = memberships.map((m) => m.orgId);
 
-      const where: Parameters<typeof prisma.job.findMany>[0] extends { where?: infer W } ? W : never = {
+      const where: any = {
         queue: { project: { orgId: { in: orgIds } } },
         ...(q.queueId && { queueId: q.queueId }),
         ...(q.status && { status: q.status as JobStatus }),
@@ -841,3 +841,4 @@ export async function jobRoutes(fastify: FastifyInstance): Promise<void> {
 }
 
 export default jobRoutes;
+

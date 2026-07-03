@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * scheduler.ts
  * ------------
  * Cron-definition materializer. Runs on a tight tick (every
@@ -66,7 +66,7 @@ async function tick(): Promise<void> {
       if (!isJobTemplate(def.jobTemplate)) {
         dlog.error(
           { jobTemplate: def.jobTemplate },
-          "Invalid jobTemplate — skipping"
+          "Invalid jobTemplate â€” skipping"
         );
         continue;
       }
@@ -81,7 +81,7 @@ async function tick(): Promise<void> {
       if (!nextRun) {
         dlog.warn(
           { cronExpression: def.cronExpression },
-          "Cron expression has no future run — deactivating"
+          "Cron expression has no future run â€” deactivating"
         );
         await prisma.scheduledJob.update({
           where: { id: def.id },
@@ -95,7 +95,7 @@ async function tick(): Promise<void> {
         data: {
           queueId: def.queueId,
           type: template.type,
-          payload: template.payload ?? {},
+          payload: (template.payload ?? {}) as never,
           priority: template.priority ?? 0,
           retryPolicyId: template.retryPolicyId ?? null,
           status: "queued",
@@ -149,3 +149,4 @@ export async function startScheduler(): Promise<void> {
 
   setInterval(() => void tick(), SCHEDULER_TICK_MS);
 }
+

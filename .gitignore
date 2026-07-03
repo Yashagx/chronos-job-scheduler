@@ -1,0 +1,57 @@
+# ── Secrets & credentials — NEVER commit these ─────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+codeity.pem
+chronos.pem
+deploy-key.pem
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+dist/
+build/
+.next/
+out/
+
+# ── Prisma generated client ──────────────────────────────────────────────────
+# The generated client is rebuilt at container start from the schema
+api/node_modules/@prisma/
+worker/node_modules/@prisma/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+pino.log
+
+# ── Test / coverage output ────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ── OS artifacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor / IDE ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.tgz
+chronos-deploy.tar.gz
+.turbo
